@@ -1,0 +1,4 @@
+web/.env.local
+bot/.env
+node_modules/
+.next/

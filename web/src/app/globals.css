@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+@theme {
+  /* Profundidade: 3 tons distintos entre página, card e superfície interna. */
+  --color-fundo: #08080c;
+  --color-superficie: #111118;
+  --color-elevado: #191922;
+  --color-borda: #23232f;
+  --color-borda-forte: #2f2f3e;
+
+  /* Accent de identidade — violeta, não semáforo. */
+  --color-accent: #7c5cff;
+  --color-accent-claro: #a68dff;
+
+  /* Texto */
+  --color-tinta: #ecebf5;
+  --color-tinta-media: #9a9ab2;
+  --color-tinta-fraca: #6a6a82;
+
+  /* Sinal (só para o sentido do número, nunca como identidade) */
+  --color-positivo: #3ddc97;
+  --color-negativo: #ff5c7a;
+
+  /* Categorias — uma cor por categoria, usada em chips e barras. */
+  --color-cat-alimentacao: #ff7a5c;
+  --color-cat-moradia: #4ecdc4;
+  --color-cat-transporte: #ffc857;
+  --color-cat-lazer: #c77dff;
+  --color-cat-mercado: #6be58a;
+  --color-cat-saude: #5ba8ff;
+  --color-cat-outros: #8d93ae;
+}
+
+html,
+body {
+  background: var(--color-fundo);
+  color: var(--color-tinta);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Brilho difuso do accent no topo da página, para o fundo não ser chapado. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -20% 0 auto 0;
+  height: 45vh;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(
+    60% 50% at 50% 0%,
+    color-mix(in oklab, var(--color-accent) 22%, transparent),
+    transparent 70%
+  );
+}
+
+body > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Números sempre com largura fixa: nada de layout pulando ao atualizar. */
+.num {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

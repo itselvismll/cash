@@ -17,9 +17,11 @@ import { supabase } from "@/lib/supabase";
 import {
   COR_CATEGORIA,
   LABEL_CATEGORIA,
+  LABEL_FORMA_PAGAMENTO,
   LABEL_TAG,
   META_PADRAO,
   type Categoria,
+  type FormaPagamento,
   type GastoCategoriaMensal,
   type GastoDiario,
   type Investimento,
@@ -28,7 +30,7 @@ import {
   type Tag,
   type Transacao,
 } from "@/lib/types";
-import { ICONE_CATEGORIA } from "@/lib/icons";
+import { ICONE_CATEGORIA, ICONE_FORMA_PAGAMENTO } from "@/lib/icons";
 import {
   chaveDoMes,
   diaDoMes,
@@ -74,6 +76,8 @@ type LancamentoRecente = {
   /** Só gasto. */
   categoria?: Categoria;
   origem?: string;
+  /** Só gasto: débito, crédito ou pix. */
+  formaPagamento?: FormaPagamento;
   /** Só gasto parcelado: rende o badge "2/5". */
   parcelaAtual?: number | null;
   parcelaTotal?: number | null;
@@ -92,6 +96,7 @@ type CompraParcelada = {
   grupoId: string;
   categoria: Categoria;
   tag: Tag;
+  formaPagamento: FormaPagamento;
   titulo: string;
   /** Valor de uma parcela (a 1ª conhecida; a última pode ter centavos a mais). */
   valorParcela: number;
@@ -146,6 +151,7 @@ function agruparParcelas(
       grupoId,
       categoria: primeira.categoria,
       tag: primeira.tag,
+      formaPagamento: primeira.forma_pagamento,
       titulo: primeira.descricao
         ? semSufixoDeParcela(primeira.descricao)
         : LABEL_CATEGORIA[primeira.categoria],
@@ -352,6 +358,7 @@ export default function DashboardClient() {
           tag: compra.tag,
           categoria: compra.categoria,
           origem: compra.origem,
+          formaPagamento: compra.formaPagamento,
         });
         continue;
       }
@@ -365,6 +372,7 @@ export default function DashboardClient() {
         tag: t.tag,
         categoria: t.categoria,
         origem: t.origem,
+        formaPagamento: t.forma_pagamento,
         parcelaAtual: t.parcela_atual,
         parcelaTotal: t.parcela_total,
       });
@@ -879,6 +887,7 @@ export default function DashboardClient() {
                       <p className="truncate text-sm font-medium">{c.titulo}</p>
                       <div className="mt-1 flex flex-wrap items-center gap-1.5">
                         <Chip texto={LABEL_CATEGORIA[c.categoria]} cor={cor} />
+                        <BadgeForma forma={c.formaPagamento} />
                         <Chip
                           texto={LABEL_TAG[c.tag]}
                           cor={
@@ -982,6 +991,9 @@ export default function DashboardClient() {
                     )}
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                       <Chip texto={LABEL_TIPO[l.tipo]} cor={corTipo} />
+                      {l.formaPagamento && (
+                        <BadgeForma forma={l.formaPagamento} />
+                      )}
                       <Chip
                         texto={LABEL_TAG[l.tag]}
                         cor={
@@ -1080,6 +1092,25 @@ function Chip({
       }}
     >
       {texto}
+    </span>
+  );
+}
+
+/**
+ * Forma de pagamento: ícone + rótulo, em cinza sobre o fundo elevado.
+ * É de propósito acromático — a cor da linha já carrega a categoria, e
+ * mais um chip colorido faria o olho ter de decidir qual dos dois está
+ * dizendo alguma coisa.
+ */
+function BadgeForma({ forma }: { forma: FormaPagamento }) {
+  const Icone = ICONE_FORMA_PAGAMENTO[forma];
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-md bg-[var(--color-elevado)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-tinta-media)]"
+      title={LABEL_FORMA_PAGAMENTO[forma]}
+    >
+      <Icone size={11} strokeWidth={2.25} aria-hidden />
+      {LABEL_FORMA_PAGAMENTO[forma]}
     </span>
   );
 }

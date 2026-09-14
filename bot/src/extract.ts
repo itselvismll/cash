@@ -1,4 +1,9 @@
-import { CATEGORIAS, type Categoria } from "./types.js";
+import {
+  CATEGORIAS,
+  MAX_PARCELAS,
+  type Categoria,
+  type FormaPagamento,
+} from "./types.js";
 
 export type GastoExtraido = {
   valor: number;
@@ -6,6 +11,9 @@ export type GastoExtraido = {
   descricao: string | null;
   /** false quando nenhuma palavra-chave bateu e caiu em "outros". */
   categoriaIdentificada: boolean;
+  formaPagamento: FormaPagamento;
+  /** 1 = à vista. Só passa de 1 no crédito. */
+  parcelas: number;
 };
 
 /**
@@ -55,11 +63,42 @@ const PALAVRAS_CHAVE: ReadonlyArray<readonly [Categoria, readonly string[]]> = [
       "metro",
     ],
   ],
-  ["moradia", ["aluguel", "condominio", "luz", "agua", "internet", "gas"]],
+  ["moradia", ["aluguel", "condominio"]],
   ["lazer", ["cinema", "netflix", "spotify", "show", "viagem", "bar", "balada"]],
   [
     "saude",
     ["farmacia", "remedio", "consulta", "exame", "plano de saude"],
+  ],
+  [
+    "educacao",
+    ["curso", "faculdade", "escola", "livro", "mensalidade", "material escolar"],
+  ],
+  [
+    "compras",
+    [
+      "roupa",
+      "roupas",
+      "shopping",
+      "loja",
+      "amazon",
+      "shein",
+      "sapato",
+      "tenis",
+    ],
+  ],
+  // As contas de consumo saíram de moradia: moradia é o teto (aluguel,
+  // condomínio), contas é o que vence todo mês.
+  [
+    "contas",
+    [
+      "luz",
+      "agua",
+      "internet",
+      "gas",
+      "celular",
+      "telefone",
+      "conta de",
+    ],
   ],
 ];
 
@@ -134,6 +173,51 @@ function extrairValor(
   return null;
 }
 
+// ============================================================
+// Forma de pagamento e parcelas
+// ============================================================
+
+/**
+ * Quem não falar de pagamento continua caindo em pix — é o default da
+ * coluna e o comportamento de antes desta feature.
+ */
+const REGEX_CREDITO = /(?<![\p{L}\d])(?:credito|cartao|parcelad[oa])(?![\p{L}\d])/u;
+const REGEX_DEBITO = /(?<![\p{L}\d])debito(?![\p{L}\d])/u;
+const REGEX_PIX = /(?<![\p{L}\d])pix(?![\p{L}\d])/u;
+
+/** "5x", "5 x", "em 3 vezes", "12 parcelas". */
+const REGEX_PARCELAS =
+  /(?<![\p{L}\d])(\d{1,2})\s*(?:x|vezes|parcelas?)(?![\p{L}\d])/u;
+
+/**
+ * Os tokens de pagamento saem do texto ANTES de procurar valor,
+ * categoria e descrição. Sem isso "gastei 150 no mercado em 5x no
+ * credito" viraria a descrição "mercado em 5x no credito", e um
+ * "3x 300 na loja" leria o 3 do "3x" como valor.
+ *
+ * As variantes com e sem acento entram juntas porque este corte é feito
+ * no texto original — normalizar aqui apagaria o acento da descrição.
+ */
+const REGEX_TOKENS_PAGAMENTO = new RegExp(
+  String.raw`(?:(?<![\p{L}\d])(?:n[oa]|em|de|d[oa])\s+)?(?<![\p{L}\d])(?:cr[eé]dito|cart[aã]o(?:\s+de\s+cr[eé]dito)?|d[eé]bito|pix|parcelad[oa]|\d{1,2}\s*(?:x|vezes|parcelas?))(?![\p{L}\d])`,
+  "giu",
+);
+
+function extrairFormaPagamento(normalizado: string): FormaPagamento {
+  if (REGEX_CREDITO.test(normalizado)) return "credito";
+  if (REGEX_DEBITO.test(normalizado)) return "debito";
+  if (REGEX_PIX.test(normalizado)) return "pix";
+  return "pix";
+}
+
+function extrairParcelas(normalizado: string): number {
+  const m = REGEX_PARCELAS.exec(normalizado);
+  if (!m) return 1;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(n, MAX_PARCELAS);
+}
+
 /** Categoria pela palavra-chave mais específica encontrada no texto. */
 function extrairCategoria(normalizado: string): Categoria | null {
   let melhor: { categoria: Categoria; tamanho: number } | null = null;
@@ -159,25 +243,41 @@ export function extrairGasto(mensagem: string): GastoExtraido | null {
   const texto = mensagem.trim();
   if (!texto) return null;
 
-  const encontrado = extrairValor(texto);
+  // Pagamento é lido da mensagem inteira, e só então os tokens somem do
+  // texto — o resto do parser trabalha sobre o que sobrou.
+  const normalizado = normalizar(texto);
+  const formaPagamento = extrairFormaPagamento(normalizado);
+  const parcelasLidas = extrairParcelas(normalizado);
+
+  const limpo = texto
+    .replace(REGEX_TOKENS_PAGAMENTO, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const encontrado = extrairValor(limpo);
   if (!encontrado) return null;
 
   // A categoria é procurada no texto SEM o número, para que o valor "99"
   // em "gastei 99 de comida" não seja confundido com o app 99.
-  const semValor = texto.slice(0, encontrado.inicio) + " " + texto.slice(encontrado.fim);
+  const semValor = limpo.slice(0, encontrado.inicio) + " " + limpo.slice(encontrado.fim);
   const categoria = extrairCategoria(normalizar(semValor));
 
   // Descrição: o que vem depois do valor ("gastei 30 no mcdonalds" -> "mcdonalds").
   // Quando o valor está no fim ("uber 22,50"), cai para a mensagem sem o número
   // -> "uber"; e se nem isso sobrar, para a mensagem original.
-  const depois = limpar(texto.slice(encontrado.fim));
-  const descricao = depois || limpar(semValor) || texto.trim();
+  const depois = limpar(limpo.slice(encontrado.fim));
+  const descricao = depois || limpar(semValor) || limpo || texto;
 
+  // Parcelar só existe no crédito. Quem escreve "300 3x" sem dizer a
+  // forma está falando de cartão — ninguém parcela um pix.
+  const parcelado = parcelasLidas > 1;
   return {
     valor: encontrado.valor,
     categoria: categoria ?? "outros",
     descricao: descricao || null,
     categoriaIdentificada: categoria !== null,
+    formaPagamento: parcelado ? "credito" : formaPagamento,
+    parcelas: formaPagamento === "credito" || parcelado ? parcelasLidas : 1,
   };
 }
 
@@ -197,11 +297,18 @@ const ABERTURAS_DE_RENDA = [
   "recebi",
   "recebemos",
   "recebeu",
+  "receberam",
+  "recebido",
+  "recebida",
+  "recebendo",
+  "receber",
   "caiu",
   "cairam",
   "entrou",
   "entraram",
   "pagamento",
+  "salario",
+  "adiantamento",
 ] as const;
 
 const REGEX_RENDA = new RegExp(
@@ -209,8 +316,53 @@ const REGEX_RENDA = new RegExp(
   "u",
 );
 
-/** "investi 100", "investimos 200" -> tabela investimentos. */
-const ABERTURAS_DE_INVESTIMENTO = ["investi", "investimos"] as const;
+/**
+ * "investi 100", "guardei 200" -> tabela investimentos.
+ *
+ * Cada verbo entra com suas conjugações, e não só a 1ª pessoa. O `\b` no
+ * fim da regex faz "investi" NÃO casar com "investido" — antes essa lista
+ * tinha só "investi" e "investimos", e "investido 150" caía calado em
+ * gasto/outros. Foi o que corrompeu um lançamento real no dia 14/09.
+ *
+ * "guardar", "aplicar" e "poupar" entram porque são as palavras que a
+ * própria interface usa ("Total guardado", "Quem guardou").
+ */
+const ABERTURAS_DE_INVESTIMENTO = [
+  "investi",
+  "investiu",
+  "investimos",
+  "investiram",
+  "investido",
+  "investida",
+  "investindo",
+  "investir",
+  "investimento",
+  "investimentos",
+  "guardei",
+  "guardou",
+  "guardamos",
+  "guardaram",
+  "guardado",
+  "guardada",
+  "guardando",
+  "guardar",
+  "apliquei",
+  "aplicou",
+  "aplicamos",
+  "aplicaram",
+  "aplicado",
+  "aplicada",
+  "aplicando",
+  "aplicar",
+  "poupei",
+  "poupou",
+  "poupamos",
+  "pouparam",
+  "poupado",
+  "poupada",
+  "poupando",
+  "poupar",
+] as const;
 
 const REGEX_INVESTIMENTO = new RegExp(
   String.raw`^(?:${ABERTURAS_DE_INVESTIMENTO.join("|")})\b`,

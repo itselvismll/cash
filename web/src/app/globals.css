@@ -28,6 +28,11 @@
   --color-cat-lazer: #c77dff;
   --color-cat-mercado: #6be58a;
   --color-cat-saude: #5ba8ff;
+  /* As 3 novas ocupam as faixas de matiz que sobravam — indigo,
+     rosa e lima — para não colidir com as 6 acima nas barras. */
+  --color-cat-educacao: #5f6dff;
+  --color-cat-compras: #ff5ca8;
+  --color-cat-contas: #a3d13a;
   --color-cat-outros: #8d93ae;
 }
 

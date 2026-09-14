@@ -1,6 +1,16 @@
+import { randomUUID } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import { env } from "./env.js";
-import type { Categoria, Tag } from "./types.js";
+import {
+  LABEL_CATEGORIA,
+  MAX_PARCELAS,
+  competenciaDaParcela,
+  dataDeHoje,
+  dividirEmParcelas,
+  type Categoria,
+  type FormaPagamento,
+  type Tag,
+} from "./types.js";
 
 // service_role key: o bot roda no servidor e ignora RLS.
 export const supabase = createClient(
@@ -16,19 +26,81 @@ export function idCurto(id: string): string {
   return id.slice(-4);
 }
 
-export async function inserirTransacao(entrada: {
+export type EntradaGasto = {
   valor: number;
   categoria: Categoria;
   tag: Tag;
   descricao: string | null;
-}): Promise<string> {
+  formaPagamento: FormaPagamento;
+  /** 1 = à vista. */
+  parcelas: number;
+};
+
+export type GastoGravado = {
+  /** id da 1ª linha — é o que vai no "/apagar xxxx" da confirmação. */
+  id: string;
+  /** Valor de cada parcela; 1 item quando à vista. */
+  valores: number[];
+};
+
+/**
+ * Grava o gasto. Parcelado, são N linhas de uma vez: mesmo
+ * compra_grupo_id e cada uma competindo ao seu mês, exatamente como o
+ * formulário web faz — é o que faz a parcela 3 só pesar no orçamento
+ * de daqui a dois meses.
+ */
+export async function inserirGasto(
+  entrada: EntradaGasto,
+): Promise<GastoGravado> {
+  const hoje = new Date();
+  const parcelas = Math.min(Math.max(entrada.parcelas, 1), MAX_PARCELAS);
+  const comum = {
+    categoria: entrada.categoria,
+    tag: entrada.tag,
+    origem: "telegram" as const,
+    forma_pagamento: entrada.formaPagamento,
+  };
+
+  if (parcelas === 1) {
+    const { data, error } = await supabase
+      .from("transacoes")
+      .insert({
+        ...comum,
+        valor: entrada.valor,
+        descricao: entrada.descricao,
+        data_competencia: dataDeHoje(hoje),
+        compra_grupo_id: null,
+        parcela_atual: null,
+        parcela_total: null,
+      })
+      .select("id")
+      .single();
+    if (error) throw new Error(error.message);
+    return { id: data.id as string, valores: [entrada.valor] };
+  }
+
+  const grupo = randomUUID();
+  const valores = dividirEmParcelas(entrada.valor, parcelas);
+  const base = entrada.descricao ?? LABEL_CATEGORIA[entrada.categoria];
   const { data, error } = await supabase
     .from("transacoes")
-    .insert({ ...entrada, origem: "telegram" })
-    .select("id")
-    .single();
+    .insert(
+      valores.map((valor, i) => ({
+        ...comum,
+        valor,
+        descricao: `${base} (parcela ${i + 1}/${parcelas})`,
+        data_competencia: competenciaDaParcela(hoje, i),
+        compra_grupo_id: grupo,
+        parcela_atual: i + 1,
+        parcela_total: parcelas,
+      })),
+    )
+    .select("id");
   if (error) throw new Error(error.message);
-  return data.id as string;
+
+  const primeiro = data?.[0]?.id as string | undefined;
+  if (!primeiro) throw new Error("Insert das parcelas não devolveu id.");
+  return { id: primeiro, valores };
 }
 
 export async function inserirRenda(entrada: {
@@ -66,10 +138,19 @@ export async function inserirInvestimento(entrada: {
 export type Lancamento = {
   id: string;
   tipo: TipoRegistro;
+  /** Numa compra parcelada é o valor DA PARCELA, não o total. */
   valor: number;
   created_at: string;
   detalhe: string | null;
+  /** Preenchidos só em gasto parcelado. */
+  compraGrupoId?: string | null;
+  parcelas?: number | null;
 };
+
+/** Tira o "(parcela 2/5)" que o insert grava na descrição. */
+function semSufixoDeParcela(texto: string): string {
+  return texto.replace(/\s*\(parcela \d+\/\d+\)\s*$/u, "").trim();
+}
 
 /**
  * Quantas linhas recentes de cada tabela olhamos ao resolver um id curto.
@@ -86,7 +167,9 @@ export async function listarUltimos(
   const [gastos, rendas, investimentos] = await Promise.all([
     supabase
       .from("transacoes")
-      .select("id, valor, created_at, categoria, descricao")
+      .select(
+        "id, valor, created_at, categoria, descricao, compra_grupo_id, parcela_total",
+      )
       .eq("tag", tag)
       .order("created_at", { ascending: false })
       .limit(JANELA_BUSCA),
@@ -110,14 +193,34 @@ export async function listarUltimos(
     investimentos.error?.message;
   if (falha) throw new Error(falha);
 
-  const todos: Lancamento[] = [
-    ...(gastos.data ?? []).map((g) => ({
+  /**
+   * Uma compra parcelada entra como UM lançamento, não como N: 5 parcelas
+   * ocupariam os 5 slots do /ultimos. O valor exibido é o da parcela (que
+   * é o que o extrato do cartão mostra), nunca uma soma — somar aqui
+   * daria número errado se o grupo não couber inteiro na janela de busca.
+   */
+  const gruposVistos = new Set<string>();
+  const linhasDeGasto: Lancamento[] = [];
+  for (const g of gastos.data ?? []) {
+    const grupo = (g.compra_grupo_id as string | null) ?? null;
+    if (grupo) {
+      if (gruposVistos.has(grupo)) continue;
+      gruposVistos.add(grupo);
+    }
+    const descricao = (g.descricao as string | null) ?? (g.categoria as string);
+    linhasDeGasto.push({
       id: g.id as string,
-      tipo: "gasto" as const,
+      tipo: "gasto",
       valor: Number(g.valor),
       created_at: g.created_at as string,
-      detalhe: (g.descricao as string | null) ?? (g.categoria as string),
-    })),
+      detalhe: grupo ? semSufixoDeParcela(descricao) : descricao,
+      compraGrupoId: grupo,
+      parcelas: (g.parcela_total as number | null) ?? null,
+    });
+  }
+
+  const todos: Lancamento[] = [
+    ...linhasDeGasto,
     ...(rendas.data ?? []).map((r) => ({
       id: r.id as string,
       tipo: "renda" as const,
@@ -159,10 +262,14 @@ export async function apagarPorIdCurto(
   );
   if (!alvo) return null;
 
-  const { error } = await supabase
-    .from(TABELA[alvo.tipo])
-    .delete()
-    .eq("id", alvo.id);
+  // Compra parcelada sai inteira. Apagar só a parcela apontada deixaria as
+  // outras órfãs no orçamento dos meses seguintes, sem jeito de achá-las.
+  const { error } = alvo.compraGrupoId
+    ? await supabase
+        .from("transacoes")
+        .delete()
+        .eq("compra_grupo_id", alvo.compraGrupoId)
+    : await supabase.from(TABELA[alvo.tipo]).delete().eq("id", alvo.id);
   if (error) throw new Error(error.message);
 
   return alvo;

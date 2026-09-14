@@ -79,3 +79,38 @@ export function chaveDoMes(iso: string): string {
 export function diaDoMes(iso: string): number {
   return Number(iso.slice(8, 10));
 }
+
+/**
+ * Divide um total em N parcelas, em centavos, e a ÚLTIMA absorve a
+ * diferença do arredondamento. Trabalhar em centavos inteiros evita o
+ * 0.1 + 0.2 do float: a soma das parcelas é exatamente o total.
+ *
+ * 150 em 5x -> [30, 30, 30, 30, 30]
+ * 100 em 3x -> [33.33, 33.33, 33.34]
+ */
+export function dividirEmParcelas(total: number, parcelas: number): number[] {
+  const centavos = Math.round(total * 100);
+  const base = Math.floor(centavos / parcelas);
+  const valores = Array<number>(parcelas).fill(base);
+  valores[parcelas - 1] = centavos - base * (parcelas - 1);
+  return valores.map((c) => c / 100);
+}
+
+/**
+ * Competência da parcela: mesma data, N meses à frente.
+ *
+ * O dia é limitado ao último dia do mês alvo, senão uma compra em 31/01
+ * parcelada viraria 31/02 — que o JS rola para 03/03 e jogaria a parcela
+ * no mês errado. O dashboard só agrupa por mês, então o dia é cosmético;
+ * o que não pode é vazar para o mês seguinte.
+ */
+export function competenciaDaParcela(base: Date, mesesAFrente: number): string {
+  const alvo = new Date(base.getFullYear(), base.getMonth() + mesesAFrente, 1);
+  const ultimoDia = new Date(
+    alvo.getFullYear(),
+    alvo.getMonth() + 1,
+    0,
+  ).getDate();
+  alvo.setDate(Math.min(base.getDate(), ultimoDia));
+  return toISODate(alvo);
+}

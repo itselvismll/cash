@@ -1,9 +1,12 @@
 import {
   Car,
+  GraduationCap,
   HeartPulse,
   House,
   Package,
   PartyPopper,
+  Receipt,
+  ShoppingBag,
   ShoppingCart,
   UtensilsCrossed,
   type LucideIcon,
@@ -18,5 +21,8 @@ export const ICONE_CATEGORIA: Record<Categoria, LucideIcon> = {
   lazer: PartyPopper,
   mercado: ShoppingCart,
   saude: HeartPulse,
+  educacao: GraduationCap,
+  compras: ShoppingBag,
+  contas: Receipt,
   outros: Package,
 };

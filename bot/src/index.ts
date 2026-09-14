@@ -11,19 +11,21 @@ import {
   idCurto,
   inserirInvestimento,
   inserirRenda,
-  inserirTransacao,
+  inserirGasto,
   listarUltimos,
   buscarMeta,
   type TipoRegistro,
 } from "./db.js";
 import {
   LABEL_CATEGORIA,
+  LABEL_FORMA_PAGAMENTO,
   LABEL_TAG,
   META_PADRAO,
   dataDeHoje,
   formatBRL,
   formatData,
   type Categoria,
+  type FormaPagamento,
   type Tag,
 } from "./types.js";
 import { PESSOAS, identificar } from "./pessoas.js";
@@ -77,6 +79,9 @@ bot.command("start", async (ctx) => {
       '• Gasto: "gastei 30 no mcdonalds"\n' +
       '• Renda: "recebi 2000"\n' +
       '• Investimento: "investi 100"\n\n' +
+      "Forma de pagamento (sem dizer nada, é pix):\n" +
+      '• "80 debito farmacia"\n' +
+      '• "gastei 150 no mercado em 5x no credito"\n\n' +
       "Outros comandos:\n" +
       "/ultimos — seus 5 últimos lançamentos\n" +
       "/apagar <id> — apaga um lançamento",
@@ -117,7 +122,11 @@ bot.command("ultimos", async (ctx) => {
   const linhas = lancamentos.map((l) => {
     const quando = new Date(l.created_at).toLocaleDateString("pt-BR");
     const detalhe = l.detalhe ? ` · ${l.detalhe}` : "";
-    return `${emoji[l.tipo]} \`${idCurto(l.id)}\` ${formatBRL(l.valor)} · ${l.tipo}${detalhe} · ${quando}`;
+    // Compra parcelada entra como uma linha só, e o valor é o da parcela.
+    const valor = l.parcelas
+      ? `${l.parcelas}x de ${formatBRL(l.valor)}`
+      : formatBRL(l.valor);
+    return `${emoji[l.tipo]} \`${idCurto(l.id)}\` ${valor} · ${l.tipo}${detalhe} · ${quando}`;
   });
 
   await ctx.reply(
@@ -159,9 +168,12 @@ bot.command("apagar", async (ctx) => {
   }
 
   const detalhe = apagado.detalhe ? ` (${apagado.detalhe})` : "";
-  await ctx.reply(
-    `🗑 Apagado: ${apagado.tipo} de ${formatBRL(apagado.valor)}${detalhe}.`,
-  );
+  // Compra parcelada sai inteira — vale deixar explícito que as outras
+  // parcelas foram embora também.
+  const oQue = apagado.parcelas
+    ? `compra parcelada em ${apagado.parcelas}x de ${formatBRL(apagado.valor)}${detalhe} — todas as parcelas`
+    : `${apagado.tipo} de ${formatBRL(apagado.valor)}${detalhe}`;
+  await ctx.reply(`🗑 Apagado: ${oQue}.`);
 });
 
 // ============================================================
@@ -272,6 +284,8 @@ async function lancarGasto(ctx: Contexto, tag: Tag, texto: string) {
         categoria: "outros",
         tag: pendente.tag,
         descricao: pendente.descricao,
+        formaPagamento: pendente.formaPagamento,
+        parcelas: pendente.parcelas,
       }).catch((erro) =>
         console.error("Falha ao gravar gasto no timeout:", erro),
       );
@@ -281,6 +295,8 @@ async function lancarGasto(ctx: Contexto, tag: Tag, texto: string) {
       valor: gasto.valor,
       descricao: gasto.descricao,
       tag,
+      formaPagamento: gasto.formaPagamento,
+      parcelas: gasto.parcelas,
       timer,
     });
 
@@ -296,6 +312,8 @@ async function lancarGasto(ctx: Contexto, tag: Tag, texto: string) {
     categoria: gasto.categoria,
     tag,
     descricao: gasto.descricao,
+    formaPagamento: gasto.formaPagamento,
+    parcelas: gasto.parcelas,
   });
 }
 
@@ -306,11 +324,13 @@ async function gravarGasto(
     categoria: Categoria;
     tag: Tag;
     descricao: string | null;
+    formaPagamento: FormaPagamento;
+    parcelas: number;
   },
 ): Promise<void> {
-  let id: string;
+  let gravado;
   try {
-    id = await inserirTransacao(entrada);
+    gravado = await inserirGasto(entrada);
   } catch (erro) {
     console.error("Falha ao gravar gasto no Supabase:", erro);
     await ctx.reply("⚠️ Entendi o gasto, mas não consegui salvar. Tenta de novo.");
@@ -318,9 +338,16 @@ async function gravarGasto(
   }
 
   const detalhe = entrada.descricao ? ` (${entrada.descricao})` : "";
+  // Parcelado, a confirmação mostra o total E o valor da parcela: o total
+  // é o que foi comprado, a parcela é o que pesa por mês.
+  const pagamento =
+    gravado.valores.length > 1
+      ? `, ${gravado.valores.length}x de ${formatBRL(gravado.valores[0])} no crédito`
+      : ` no ${LABEL_FORMA_PAGAMENTO[entrada.formaPagamento]}`;
+
   await ctx.reply(
-    `✅ ${formatBRL(entrada.valor)} em ${entrada.categoria}${detalhe} - ${LABEL_TAG[entrada.tag]}` +
-      comoApagar(id),
+    `✅ ${formatBRL(entrada.valor)} em ${LABEL_CATEGORIA[entrada.categoria]}${detalhe}${pagamento} - ${LABEL_TAG[entrada.tag]}` +
+      comoApagar(gravado.id),
   );
 }
 
@@ -359,6 +386,8 @@ bot.on("callback_query:data", async (ctx) => {
     categoria: dados.categoria,
     tag: pendente.tag,
     descricao: pendente.descricao,
+    formaPagamento: pendente.formaPagamento,
+    parcelas: pendente.parcelas,
   });
 });
 

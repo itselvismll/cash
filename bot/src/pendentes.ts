@@ -1,5 +1,11 @@
 import { InlineKeyboard } from "grammy";
-import { CATEGORIAS, LABEL_CATEGORIA, type Categoria, type Tag } from "./types.js";
+import {
+  CATEGORIAS,
+  LABEL_CATEGORIA,
+  type Categoria,
+  type FormaPagamento,
+  type Tag,
+} from "./types.js";
 
 /**
  * Gasto cuja categoria o parser não reconheceu e que está esperando o
@@ -9,6 +15,9 @@ export type GastoPendente = {
   valor: number;
   descricao: string | null;
   tag: Tag;
+  /** Forma e parcelas já vieram da mensagem: só a categoria falta. */
+  formaPagamento: FormaPagamento;
+  parcelas: number;
   /** Timer que grava como "outros" se ninguém responder. */
   timer: NodeJS.Timeout;
 };
@@ -50,7 +59,7 @@ export function tecladoDeCategorias(token: string): InlineKeyboard {
   const teclado = new InlineKeyboard();
   CATEGORIAS.forEach((c, i) => {
     teclado.text(LABEL_CATEGORIA[c], `cat:${c}:${token}`);
-    // Duas por linha; a última (outros) fica sozinha, destacada.
+    // Duas por linha — 10 categorias, 5 linhas.
     if (i % 2 === 1) teclado.row();
   });
   return teclado;

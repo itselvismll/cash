@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ChartColumnBig,
   CircleAlert,
+  CreditCard,
   PiggyBank,
   Receipt,
   Target,
@@ -21,8 +22,10 @@ import {
   type Categoria,
   type GastoCategoriaMensal,
   type GastoDiario,
+  type Investimento,
   type InvestimentoMensal,
   type Renda,
+  type Tag,
   type Transacao,
 } from "@/lib/types";
 import { ICONE_CATEGORIA } from "@/lib/icons";
@@ -33,8 +36,7 @@ import {
   formatBRL,
   formatDataHora,
   inicioDoMes,
-  inicioDoMesInstante,
-  inicioDoProximoMesInstante,
+  inicioDoProximoMes,
   mesesAtras,
   nomeDoMes,
   toISODate,
@@ -53,6 +55,138 @@ const JANELA_MESES = 6;
 /** Quantos meses fechados formam a média por categoria. */
 const JANELA_CATEGORIA = 3;
 
+/** Quantas linhas o card "Últimos lançamentos" mostra. */
+const LIMITE_LANCAMENTOS = 20;
+
+/**
+ * Linha da lista de lançamentos: as três tabelas achatadas numa forma só.
+ * A lista é por recência (created_at), sem recorte de mês — diferente dos
+ * KPIs acima, que são todos do mês corrente.
+ */
+type LancamentoRecente = {
+  /** Prefixado pelo tipo: os uuids vêm de tabelas diferentes. */
+  id: string;
+  tipo: "gasto" | "renda" | "investimento";
+  valor: number;
+  created_at: string;
+  titulo: string;
+  tag: Tag;
+  /** Só gasto. */
+  categoria?: Categoria;
+  origem?: string;
+  /** Só gasto parcelado: rende o badge "2/5". */
+  parcelaAtual?: number | null;
+  parcelaTotal?: number | null;
+  /** Compra parcelada agrupada: "5x de R$ 30,00 (total R$ 150,00)". */
+  subtitulo?: string | null;
+  /** Só renda: pode ser futura, e aí ainda não entrou no saldo. */
+  dataRecebimento?: string;
+};
+
+/**
+ * Uma compra parcelada vista como um todo, montada a partir das suas
+ * linhas em `transacoes`. É o que alimenta tanto a linha única em
+ * "Últimos lançamentos" quanto o card "Parcelas em andamento".
+ */
+type CompraParcelada = {
+  grupoId: string;
+  categoria: Categoria;
+  tag: Tag;
+  titulo: string;
+  /** Valor de uma parcela (a 1ª conhecida; a última pode ter centavos a mais). */
+  valorParcela: number;
+  /** Soma das parcelas conhecidas. */
+  total: number;
+  parcelaTotal: number;
+  /** Em que parcela a compra está: a do mês corrente, ou a próxima. */
+  parcelaAtual: number;
+  /** Parcelas com competência no mês corrente ou à frente. */
+  restantes: number;
+  /** Quanto essas parcelas restantes somam. */
+  falta: number;
+  /** Quando a compra foi lançada — a menor created_at do grupo. */
+  createdAt: string;
+  origem: string;
+};
+
+/** Tira o "(parcela 2/5)" que o insert grava na descrição. */
+function semSufixoDeParcela(texto: string): string {
+  return texto.replace(/\s*\(parcela \d+\/\d+\)\s*$/u, "").trim();
+}
+
+/**
+ * Agrupa as linhas de parcela por compra.
+ *
+ * `mesAtual` (YYYY-MM-01) define o que ainda falta pagar: uma parcela do
+ * mês corrente conta como restante, porque o mês não fechou.
+ */
+function agruparParcelas(
+  linhas: Transacao[],
+  mesAtual: string,
+): CompraParcelada[] {
+  const porGrupo = new Map<string, Transacao[]>();
+  for (const linha of linhas) {
+    if (!linha.compra_grupo_id) continue;
+    const atual = porGrupo.get(linha.compra_grupo_id);
+    if (atual) atual.push(linha);
+    else porGrupo.set(linha.compra_grupo_id, [linha]);
+  }
+
+  const compras: CompraParcelada[] = [];
+  for (const [grupoId, doGrupo] of porGrupo) {
+    const ordenadas = [...doGrupo].sort((a, b) =>
+      (a.parcela_atual ?? 0) - (b.parcela_atual ?? 0),
+    );
+    const primeira = ordenadas[0];
+    const restantes = ordenadas.filter(
+      (l) => chaveDoMes(l.data_competencia) >= mesAtual,
+    );
+
+    compras.push({
+      grupoId,
+      categoria: primeira.categoria,
+      tag: primeira.tag,
+      titulo: primeira.descricao
+        ? semSufixoDeParcela(primeira.descricao)
+        : LABEL_CATEGORIA[primeira.categoria],
+      valorParcela: Number(primeira.valor),
+      total: ordenadas.reduce((acc, l) => acc + Number(l.valor), 0),
+      parcelaTotal: primeira.parcela_total ?? ordenadas.length,
+      parcelaAtual:
+        restantes[0]?.parcela_atual ??
+        primeira.parcela_total ??
+        ordenadas.length,
+      restantes: restantes.length,
+      falta: restantes.reduce((acc, l) => acc + Number(l.valor), 0),
+      createdAt: ordenadas.reduce(
+        (menor, l) => (l.created_at < menor ? l.created_at : menor),
+        primeira.created_at,
+      ),
+      origem: primeira.origem,
+    });
+  }
+
+  return compras;
+}
+
+const LABEL_TIPO: Record<LancamentoRecente["tipo"], string> = {
+  gasto: "Gasto",
+  renda: "Renda",
+  investimento: "Investimento",
+};
+
+const COR_TIPO: Record<LancamentoRecente["tipo"], string> = {
+  gasto: "var(--color-negativo)",
+  renda: "var(--color-positivo)",
+  investimento: "var(--color-accent-claro)",
+};
+
+const ICONE_TIPO: Record<LancamentoRecente["tipo"], typeof TrendingUp> = {
+  gasto: TrendingDown,
+  renda: TrendingUp,
+  investimento: PiggyBank,
+};
+
 export default function DashboardClient() {
   const [transacoes, setTransacoes] = useState<Transacao[]>([]);
   const [rendas, setRendas] = useState<Renda[]>([]);
@@ -65,6 +199,8 @@ export default function DashboardClient() {
   const [gastosCategoria, setGastosCategoria] = useState<
     GastoCategoriaMensal[]
   >([]);
+  const [lancamentos, setLancamentos] = useState<LancamentoRecente[]>([]);
+  const [parcelas, setParcelas] = useState<Transacao[]>([]);
   const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState<string | null>(null);
 
@@ -72,8 +208,7 @@ export default function DashboardClient() {
     setErro(null);
     const agora = new Date();
     const primeiroDia = inicioDoMes(agora);
-    const inicioInstante = inicioDoMesInstante(agora);
-    const proximoInstante = inicioDoProximoMesInstante(agora);
+    const proximoMes = inicioDoProximoMes(agora);
     const hoje = toISODate(agora);
 
     const [
@@ -84,12 +219,20 @@ export default function DashboardClient() {
       resInvestimentos,
       resDiarios,
       resCategoria,
+      resUltimosGastos,
+      resUltimasRendas,
+      resUltimosInvestimentos,
+      resParcelas,
     ] = await Promise.all([
+      // O recorte do mês é por data_competencia, NÃO por created_at: a
+      // parcela 3 de 5 nasceu junto com as outras, mas só pesa no
+      // orçamento do mês dela. Vale para o KPI de gasto, para as
+      // categorias e para o gráfico (que lê as views, já ajustadas).
       supabase
         .from("transacoes")
         .select("*")
-        .gte("created_at", inicioInstante)
-        .lt("created_at", proximoInstante)
+        .gte("data_competencia", primeiroDia)
+        .lt("data_competencia", proximoMes)
         .order("created_at", { ascending: false }),
       // Renda JA RECEBIDA no mes: data_recebimento entre o dia 1 e hoje.
       supabase
@@ -123,6 +266,35 @@ export default function DashboardClient() {
         .select("mes, categoria, total")
         .gte("mes", mesesAtras(JANELA_CATEGORIA, agora))
         .lt("mes", primeiroDia),
+      // Últimos lançamentos: as três tabelas, por recência e SEM recorte de
+      // mês. Pegar LIMITE de cada uma e cortar depois da junção garante as
+      // N mais recentes do conjunto, independente de como se distribuem.
+      supabase
+        .from("transacoes")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(LIMITE_LANCAMENTOS),
+      supabase
+        .from("renda")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(LIMITE_LANCAMENTOS),
+      supabase
+        .from("investimentos")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(LIMITE_LANCAMENTOS),
+      // TODAS as linhas das compras parceladas da janela — não só as do
+      // mês. Sem o grupo inteiro não há como somar o total da compra nem
+      // saber quanto ainda falta pagar. O corte por competência mantém a
+      // consulta pequena: uma compra recente tem todas as parcelas daqui
+      // para frente, então nenhuma delas fica de fora.
+      supabase
+        .from("transacoes")
+        .select("*")
+        .not("compra_grupo_id", "is", null)
+        .gte("data_competencia", mesesAtras(JANELA_MESES, agora))
+        .order("data_competencia", { ascending: true }),
     ]);
 
     const falha =
@@ -132,7 +304,11 @@ export default function DashboardClient() {
       resPatrimonio.error?.message ??
       resInvestimentos.error?.message ??
       resDiarios.error?.message ??
-      resCategoria.error?.message;
+      resCategoria.error?.message ??
+      resUltimosGastos.error?.message ??
+      resUltimasRendas.error?.message ??
+      resUltimosInvestimentos.error?.message ??
+      resParcelas.error?.message;
     if (falha) setErro(falha);
 
     setTransacoes((resTransacoes.data as Transacao[]) ?? []);
@@ -146,6 +322,84 @@ export default function DashboardClient() {
     );
     setGastosDiarios((resDiarios.data as GastoDiario[]) ?? []);
     setGastosCategoria((resCategoria.data as GastoCategoriaMensal[]) ?? []);
+
+    const linhasParceladas = (resParcelas.data as Transacao[]) ?? [];
+    setParcelas(linhasParceladas);
+
+    // Uma compra parcelada vira UMA linha da lista, com o total e a data do
+    // lançamento original — cinco parcelas ocupariam cinco slots e
+    // esconderiam tudo o mais que foi lançado no dia.
+    const comprasPorGrupo = new Map(
+      agruparParcelas(linhasParceladas, primeiroDia).map((c) => [c.grupoId, c]),
+    );
+    const gastosAgrupados: LancamentoRecente[] = [];
+    const gruposJaListados = new Set<string>();
+    for (const t of ((resUltimosGastos.data as Transacao[]) ?? [])) {
+      const compra = t.compra_grupo_id
+        ? comprasPorGrupo.get(t.compra_grupo_id)
+        : undefined;
+
+      if (compra) {
+        if (gruposJaListados.has(compra.grupoId)) continue;
+        gruposJaListados.add(compra.grupoId);
+        gastosAgrupados.push({
+          id: `compra-${compra.grupoId}`,
+          tipo: "gasto",
+          valor: compra.total,
+          created_at: compra.createdAt,
+          titulo: compra.titulo,
+          subtitulo: `${compra.parcelaTotal}x de ${formatBRL(compra.valorParcela)} (total ${formatBRL(compra.total)})`,
+          tag: compra.tag,
+          categoria: compra.categoria,
+          origem: compra.origem,
+        });
+        continue;
+      }
+
+      gastosAgrupados.push({
+        id: `gasto-${t.id}`,
+        tipo: "gasto",
+        valor: Number(t.valor),
+        created_at: t.created_at,
+        titulo: t.descricao || LABEL_CATEGORIA[t.categoria],
+        tag: t.tag,
+        categoria: t.categoria,
+        origem: t.origem,
+        parcelaAtual: t.parcela_atual,
+        parcelaTotal: t.parcela_total,
+      });
+    }
+
+    setLancamentos(
+      [
+        ...gastosAgrupados,
+        ...(((resUltimasRendas.data as Renda[]) ?? []).map((r) => ({
+          id: `renda-${r.id}`,
+          tipo: "renda" as const,
+          valor: Number(r.valor),
+          created_at: r.created_at,
+          titulo: "Renda",
+          tag: r.pessoa,
+          dataRecebimento: r.data_recebimento,
+        })) satisfies LancamentoRecente[]),
+        ...(((resUltimosInvestimentos.data as Investimento[]) ?? []).map(
+          (i) => ({
+            id: `investimento-${i.id}`,
+            tipo: "investimento" as const,
+            valor: Number(i.valor),
+            created_at: i.created_at,
+            titulo: "Guardado",
+            tag: i.tag,
+          }),
+        ) satisfies LancamentoRecente[]),
+      ]
+        .sort(
+          (a, b) =>
+            new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+        )
+        .slice(0, LIMITE_LANCAMENTOS),
+    );
+
     setCarregando(false);
   }, []);
 
@@ -186,6 +440,7 @@ export default function DashboardClient() {
   const agora = new Date();
   const mesAtual = inicioDoMes(agora);
   const diaDeCorte = agora.getDate();
+  const hoje = toISODate(agora);
 
   const rendaRecebida = useMemo(
     () => rendas.reduce((acc, r) => acc + Number(r.valor), 0),
@@ -210,6 +465,24 @@ export default function DashboardClient() {
   const totalGuardado = (valorBase ?? 0) + totalInvestido;
   const progressoMeta =
     meta > 0 ? Math.max(0, Math.min(1, investidoNoMes / meta)) : 0;
+
+  /**
+   * Compras parceladas que ainda pesam: têm ao menos uma parcela no mês
+   * corrente ou à frente. As que já quitaram saem da lista sozinhas.
+   * Ordena por quantas faltam — o que está acabando aparece primeiro.
+   */
+  const comprasAtivas = useMemo(
+    () =>
+      agruparParcelas(parcelas, mesAtual)
+        .filter((c) => c.restantes > 0)
+        .sort((a, b) => a.restantes - b.restantes || b.falta - a.falta),
+    [parcelas, mesAtual],
+  );
+
+  const totalAPagar = useMemo(
+    () => comprasAtivas.reduce((acc, c) => acc + c.falta, 0),
+    [comprasAtivas],
+  );
 
   const porCategoria = useMemo(() => {
     const mapa = new Map<Categoria, number>();
@@ -453,7 +726,7 @@ export default function DashboardClient() {
           {totalInvestido === 0 && (
             <p className="mt-4 text-xs text-[var(--color-tinta-fraca)]">
               Nenhum investimento registrado ainda: o total é só o valor base.
-              Mande &quot;investi 100&quot; no Telegram para lançar.
+              Use a aba Lançar ou mande &quot;investi 100&quot; no Telegram.
             </p>
           )}
 
@@ -561,6 +834,103 @@ export default function DashboardClient() {
         )}
       </section>
 
+      {/* Parcelas em andamento — o que já está comprado e ainda vai pesar. */}
+      {comprasAtivas.length > 0 && (
+        <section>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-[var(--color-tinta-media)]">
+              <CreditCard size={16} strokeWidth={2} aria-hidden />
+              <h2 className="text-xs font-medium uppercase tracking-[0.16em]">
+                Parcelas em andamento
+              </h2>
+            </div>
+            <span className="num text-sm text-[var(--color-tinta-media)]">
+              falta{" "}
+              <strong className="font-semibold text-[var(--color-tinta)]">
+                {formatBRL(totalAPagar)}
+              </strong>
+            </span>
+          </div>
+
+          <ul className="flex flex-col gap-2">
+            {comprasAtivas.map((c) => {
+              const Icone = ICONE_CATEGORIA[c.categoria];
+              const cor = COR_CATEGORIA[c.categoria];
+              const pagas = c.parcelaTotal - c.restantes;
+              const progresso =
+                c.parcelaTotal > 0 ? pagas / c.parcelaTotal : 0;
+              return (
+                <li
+                  key={c.grupoId}
+                  className="rounded-2xl border border-[var(--color-borda)] bg-[var(--color-superficie)] p-3"
+                >
+                  <div className="flex items-center gap-3">
+                    <span
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl"
+                      style={{
+                        background: `color-mix(in oklab, ${cor} 16%, transparent)`,
+                        color: cor,
+                      }}
+                    >
+                      <Icone size={19} strokeWidth={2} aria-hidden />
+                    </span>
+
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">{c.titulo}</p>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <Chip texto={LABEL_CATEGORIA[c.categoria]} cor={cor} />
+                        <Chip
+                          texto={LABEL_TAG[c.tag]}
+                          cor={
+                            c.tag === "elvis"
+                              ? "var(--color-accent-claro)"
+                              : "var(--color-cat-lazer)"
+                          }
+                        />
+                        <Chip
+                          texto={`${c.parcelaAtual}/${c.parcelaTotal}`}
+                          cor="var(--color-cat-transporte)"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="shrink-0 text-right">
+                      <p className="num text-base font-semibold">
+                        {formatBRL(c.valorParcela)}
+                      </p>
+                      <p className="num text-[11px] text-[var(--color-tinta-fraca)]">
+                        /mês
+                      </p>
+                    </div>
+                  </div>
+
+                  <div
+                    className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-[var(--color-elevado)]"
+                    role="progressbar"
+                    aria-label={`Parcelas pagas de ${c.titulo}`}
+                    aria-valuemin={0}
+                    aria-valuemax={c.parcelaTotal}
+                    aria-valuenow={pagas}
+                  >
+                    <div
+                      className="h-full rounded-full transition-[width] duration-500"
+                      style={{ width: `${progresso * 100}%`, background: cor }}
+                    />
+                  </div>
+                  <p className="mt-1.5 text-xs text-[var(--color-tinta-fraca)]">
+                    Faltam {c.restantes}{" "}
+                    {c.restantes === 1 ? "parcela" : "parcelas"} —{" "}
+                    <span className="num text-[var(--color-tinta-media)]">
+                      {formatBRL(c.falta)}
+                    </span>
+                  </p>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
+
       {/* Lançamentos */}
       <section>
         <div className="mb-3 flex items-center gap-2 text-[var(--color-tinta-media)]">
@@ -570,16 +940,27 @@ export default function DashboardClient() {
           </h2>
         </div>
 
-        {transacoes.length === 0 ? (
+        {lancamentos.length === 0 ? (
           <Vazio texto="Nada lançado ainda. Use a aba Lançar ou mande no Telegram." />
         ) : (
           <ul className="flex flex-col gap-2">
-            {transacoes.slice(0, 20).map((t) => {
-              const Icone = ICONE_CATEGORIA[t.categoria];
-              const cor = COR_CATEGORIA[t.categoria];
+            {lancamentos.map((l) => {
+              // No gasto o ícone é o da categoria, que diz mais que "gasto".
+              // Nos outros dois, o ícone do tipo.
+              const Icone =
+                l.tipo === "gasto" && l.categoria
+                  ? ICONE_CATEGORIA[l.categoria]
+                  : ICONE_TIPO[l.tipo];
+              const corTipo = COR_TIPO[l.tipo];
+              const cor =
+                l.tipo === "gasto" && l.categoria
+                  ? COR_CATEGORIA[l.categoria]
+                  : corTipo;
+              const aReceber =
+                l.dataRecebimento !== undefined && l.dataRecebimento > hoje;
               return (
                 <li
-                  key={t.id}
+                  key={l.id}
                   className="flex items-center gap-3 rounded-2xl border border-[var(--color-borda)] bg-[var(--color-superficie)] p-3"
                 >
                   <span
@@ -593,31 +974,57 @@ export default function DashboardClient() {
                   </span>
 
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium">
-                      {t.descricao || LABEL_CATEGORIA[t.categoria]}
-                    </p>
+                    <p className="truncate text-sm font-medium">{l.titulo}</p>
+                    {l.subtitulo && (
+                      <p className="num mt-0.5 truncate text-xs text-[var(--color-tinta-media)]">
+                        {l.subtitulo}
+                      </p>
+                    )}
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      <Chip texto={LABEL_TIPO[l.tipo]} cor={corTipo} />
                       <Chip
-                        texto={LABEL_TAG[t.tag]}
+                        texto={LABEL_TAG[l.tag]}
                         cor={
-                          t.tag === "elvis"
+                          l.tag === "elvis"
                             ? "var(--color-accent-claro)"
                             : "var(--color-cat-lazer)"
                         }
                       />
-                      <Chip
-                        texto={t.origem}
-                        cor="var(--color-tinta-fraca)"
-                        discreto
-                      />
+                      {l.parcelaAtual != null && l.parcelaTotal != null && (
+                        <Chip
+                          texto={`${l.parcelaAtual}/${l.parcelaTotal}`}
+                          cor="var(--color-cat-transporte)"
+                        />
+                      )}
+                      {l.origem && (
+                        <Chip
+                          texto={l.origem}
+                          cor="var(--color-tinta-fraca)"
+                          discreto
+                        />
+                      )}
+                      {aReceber && (
+                        <Chip
+                          texto="a receber"
+                          cor="var(--color-cat-transporte)"
+                          discreto
+                        />
+                      )}
                       <span className="text-[11px] text-[var(--color-tinta-fraca)]">
-                        {formatDataHora(t.created_at)}
+                        {formatDataHora(l.created_at)}
                       </span>
                     </div>
                   </div>
 
-                  <span className="num shrink-0 text-base font-semibold">
-                    {formatBRL(Number(t.valor))}
+                  <span
+                    className="num shrink-0 text-base font-semibold"
+                    style={{
+                      color:
+                        l.tipo === "gasto" ? "var(--color-tinta)" : corTipo,
+                    }}
+                  >
+                    {l.tipo === "gasto" ? "−" : "+"}
+                    {formatBRL(l.valor)}
                   </span>
                 </li>
               );

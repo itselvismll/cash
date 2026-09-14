@@ -1,3 +1,4 @@
+/** "outros" fica sempre no fim: é o fallback, não uma categoria de verdade. */
 export const CATEGORIAS = [
   "alimentacao",
   "moradia",
@@ -5,6 +6,9 @@ export const CATEGORIAS = [
   "lazer",
   "mercado",
   "saude",
+  "educacao",
+  "compras",
+  "contas",
   "outros",
 ] as const;
 
@@ -15,6 +19,15 @@ export type Tag = (typeof TAGS)[number];
 
 export type Origem = "manual" | "telegram";
 
+export const FORMAS_PAGAMENTO = ["debito", "credito", "pix"] as const;
+export type FormaPagamento = (typeof FORMAS_PAGAMENTO)[number];
+
+export const LABEL_FORMA_PAGAMENTO: Record<FormaPagamento, string> = {
+  debito: "Débito",
+  credito: "Crédito",
+  pix: "Pix",
+};
+
 export type Transacao = {
   id: string;
   valor: number;
@@ -22,6 +35,17 @@ export type Transacao = {
   tag: Tag;
   descricao: string | null;
   origem: Origem;
+  forma_pagamento: FormaPagamento;
+  /**
+   * O mês em que este valor pesa no orçamento — é por ela que o dashboard
+   * filtra e agrupa. Numa compra parcelada divergem de `created_at`: as
+   * parcelas nascem todas hoje, mas cada uma compete a um mês diferente.
+   */
+  data_competencia: string;
+  /** Liga as parcelas da mesma compra. Null em gasto à vista. */
+  compra_grupo_id: string | null;
+  parcela_atual: number | null;
+  parcela_total: number | null;
   created_at: string;
 };
 
@@ -48,6 +72,9 @@ export const LABEL_CATEGORIA: Record<Categoria, string> = {
   lazer: "Lazer",
   mercado: "Mercado",
   saude: "Saúde",
+  educacao: "Educação",
+  compras: "Compras",
+  contas: "Contas",
   outros: "Outros",
 };
 
@@ -78,6 +105,9 @@ export const COR_CATEGORIA: Record<Categoria, string> = {
   lazer: "var(--color-cat-lazer)",
   mercado: "var(--color-cat-mercado)",
   saude: "var(--color-cat-saude)",
+  educacao: "var(--color-cat-educacao)",
+  compras: "var(--color-cat-compras)",
+  contas: "var(--color-cat-contas)",
   outros: "var(--color-cat-outros)",
 };
 

@@ -8,19 +8,47 @@ create extension if not exists "pgcrypto";
 -- ------------------------------------------------------------
 -- transacoes
 -- ------------------------------------------------------------
+-- data_competencia (ver 004): created_at é QUANDO foi lançado,
+-- data_competencia é EM QUE MÊS o valor pesa no orçamento. Numa
+-- compra parcelada os dois divergem — as 5 parcelas nascem hoje,
+-- mas pesam em 5 meses diferentes. Todo cálculo de "gasto no mês"
+-- usa data_competencia; created_at ordena por recência.
 create table if not exists public.transacoes (
-  id          uuid primary key default gen_random_uuid(),
-  valor       numeric(12,2) not null check (valor > 0),
-  categoria   text not null check (categoria in (
-                'alimentacao','moradia','transporte','lazer','mercado','saude','outros')),
-  tag         text not null check (tag in ('elvis','gabi')),
-  descricao   text,
-  origem      text not null default 'manual' check (origem in ('manual','telegram')),
-  created_at  timestamptz not null default now()
+  id               uuid primary key default gen_random_uuid(),
+  valor            numeric(12,2) not null check (valor > 0),
+  categoria        text not null check (categoria in (
+                     'alimentacao','moradia','transporte','lazer','mercado','saude',
+                     'educacao','compras','contas','outros')),
+  tag              text not null check (tag in ('elvis','gabi')),
+  descricao        text,
+  origem           text not null default 'manual' check (origem in ('manual','telegram')),
+  forma_pagamento  text not null default 'pix'
+                     check (forma_pagamento in ('debito','credito','pix')),
+  data_competencia date not null default (now() at time zone 'America/Sao_Paulo')::date,
+  compra_grupo_id  uuid,
+  parcela_atual    integer,
+  parcela_total    integer,
+  created_at       timestamptz not null default now(),
+  -- Parcela só existe em par, no intervalo, e com o grupo que liga
+  -- as parcelas da mesma compra.
+  constraint transacoes_parcela_check check (
+    (parcela_atual is null and parcela_total is null)
+    or (
+      parcela_atual is not null and parcela_total is not null
+      and parcela_total >= 1
+      and parcela_atual >= 1
+      and parcela_atual <= parcela_total
+      and compra_grupo_id is not null
+    )
+  )
 );
 
-create index if not exists transacoes_created_at_idx on public.transacoes (created_at desc);
-create index if not exists transacoes_categoria_idx  on public.transacoes (categoria);
+create index if not exists transacoes_created_at_idx  on public.transacoes (created_at desc);
+create index if not exists transacoes_categoria_idx   on public.transacoes (categoria);
+create index if not exists transacoes_competencia_idx on public.transacoes (data_competencia);
+create index if not exists transacoes_compra_grupo_idx
+  on public.transacoes (compra_grupo_id)
+  where compra_grupo_id is not null;
 
 -- ------------------------------------------------------------
 -- renda
@@ -93,7 +121,7 @@ with movimentos as (
   from public.renda
   union all
   select
-    date_trunc('month', created_at at time zone 'America/Sao_Paulo')::date,
+    date_trunc('month', data_competencia)::date,
     0::numeric,
     valor
   from public.transacoes
@@ -162,8 +190,8 @@ grant select on public.investimentos_mensais to anon, authenticated;
 create or replace view public.gastos_por_dia
 with (security_invoker = true) as
 select
-  (created_at at time zone 'America/Sao_Paulo')::date as dia,
-  sum(valor) as total
+  data_competencia as dia,
+  sum(valor)       as total
 from public.transacoes
 group by 1
 order by 1;
@@ -178,7 +206,7 @@ grant select on public.gastos_por_dia to anon, authenticated;
 create or replace view public.gastos_categoria_mensais
 with (security_invoker = true) as
 select
-  date_trunc('month', created_at at time zone 'America/Sao_Paulo')::date as mes,
+  date_trunc('month', data_competencia)::date as mes,
   categoria,
   sum(valor) as total
 from public.transacoes

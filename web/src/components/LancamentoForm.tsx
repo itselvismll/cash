@@ -14,14 +14,22 @@ import { supabase } from "@/lib/supabase";
 import {
   CATEGORIAS,
   COR_CATEGORIA,
+  FORMAS_PAGAMENTO,
   LABEL_CATEGORIA,
+  LABEL_FORMA_PAGAMENTO,
   LABEL_TAG,
   TAGS,
   type Categoria,
+  type FormaPagamento,
   type Tag,
 } from "@/lib/types";
 import { ICONE_CATEGORIA } from "@/lib/icons";
-import { formatBRL, toISODate } from "@/lib/format";
+import {
+  competenciaDaParcela,
+  dividirEmParcelas,
+  formatBRL,
+  toISODate,
+} from "@/lib/format";
 
 /** Aceita "30", "30,50" e "30.50". */
 function parseValor(bruto: string): number | null {
@@ -53,12 +61,48 @@ const LABEL_PESSOA: Record<TipoLancamento, string> = {
   investimento: "Quem guardou",
 };
 
+/**
+ * Uma linha de `transacoes` pronta para inserir. O tipo é explícito para
+ * que a linha à vista (grupo/parcelas nulos) e a linha de parcela tenham
+ * exatamente a mesma forma — senão o insert recebe uma união de shapes.
+ */
+type LinhaGasto = {
+  valor: number;
+  categoria: Categoria;
+  tag: Tag;
+  origem: "manual";
+  forma_pagamento: FormaPagamento;
+  descricao: string | null;
+  data_competencia: string;
+  compra_grupo_id: string | null;
+  parcela_atual: number | null;
+  parcela_total: number | null;
+};
+
+/** Uma cor por forma de pagamento, no mesmo padrão dos chips de tag. */
+const COR_FORMA: Record<FormaPagamento, string> = {
+  debito: "var(--color-cat-saude)",
+  credito: "var(--color-cat-transporte)",
+  pix: "var(--color-cat-mercado)",
+};
+
+/** Teto de parcelas. Acima disso é erro de digitação, não compra. */
+const MAX_PARCELAS = 60;
+
+function parseParcelas(bruto: string): number {
+  const n = Math.floor(Number(bruto));
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(n, MAX_PARCELAS);
+}
+
 export default function LancamentoForm() {
   const [tipo, setTipo] = useState<TipoLancamento>("gasto");
   const [valor, setValor] = useState("");
   const [categoria, setCategoria] = useState<Categoria>("alimentacao");
   const [tag, setTag] = useState<Tag>("elvis");
   const [descricao, setDescricao] = useState("");
+  const [formaPagamento, setFormaPagamento] = useState<FormaPagamento>("pix");
+  const [parcelas, setParcelas] = useState("1");
   const [dataRecebimento, setDataRecebimento] = useState(() =>
     toISODate(new Date()),
   );
@@ -66,10 +110,64 @@ export default function LancamentoForm() {
   const [erro, setErro] = useState<string | null>(null);
   const [sucesso, setSucesso] = useState<string | null>(null);
 
+  const numParcelas = parseParcelas(parcelas);
+  /** Parcelar só existe no crédito: débito e pix saem à vista. */
+  const parcelado = formaPagamento === "credito" && numParcelas > 1;
+
+  /** Prévia do parcelamento, quando já há valor e mais de uma parcela. */
+  const previa = (() => {
+    if (!parcelado) return null;
+    const total = parseValor(valor);
+    if (total === null) return null;
+    return { parcela: dividirEmParcelas(total, numParcelas)[0], total };
+  })();
+
   function trocarTipo(novo: TipoLancamento) {
     setTipo(novo);
     setErro(null);
     setSucesso(null);
+  }
+
+  /**
+   * As linhas que o gasto vai gravar. Uma compra parcelada gera N linhas
+   * de uma vez, todas com o mesmo compra_grupo_id e cada uma competindo
+   * ao seu mês — é isso que faz a parcela 3 só pesar no orçamento de daqui
+   * a dois meses. À vista, é uma linha só.
+   */
+  function linhasDoGasto(valorNum: number): LinhaGasto[] {
+    const hoje = new Date();
+    const comum = {
+      categoria,
+      tag,
+      origem: "manual" as const,
+      forma_pagamento: formaPagamento,
+    };
+
+    if (!parcelado) {
+      return [
+        {
+          ...comum,
+          valor: valorNum,
+          descricao: descricao.trim() || null,
+          data_competencia: toISODate(hoje),
+          compra_grupo_id: null,
+          parcela_atual: null,
+          parcela_total: null,
+        },
+      ];
+    }
+
+    const grupo = crypto.randomUUID();
+    const base = descricao.trim() || LABEL_CATEGORIA[categoria];
+    return dividirEmParcelas(valorNum, numParcelas).map((valor, i) => ({
+      ...comum,
+      valor,
+      descricao: `${base} (parcela ${i + 1}/${numParcelas})`,
+      data_competencia: competenciaDaParcela(hoje, i),
+      compra_grupo_id: grupo,
+      parcela_atual: i + 1,
+      parcela_total: numParcelas,
+    }));
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -90,13 +188,7 @@ export default function LancamentoForm() {
     setSalvando(true);
     const { error } =
       tipo === "gasto"
-        ? await supabase.from("transacoes").insert({
-            valor: valorNum,
-            categoria,
-            tag,
-            descricao: descricao.trim() || null,
-            origem: "manual",
-          })
+        ? await supabase.from("transacoes").insert(linhasDoGasto(valorNum))
         : tipo === "renda"
           ? await supabase.from("renda").insert({
               pessoa: tag,
@@ -116,13 +208,16 @@ export default function LancamentoForm() {
 
     setSucesso(
       tipo === "gasto"
-        ? `${formatBRL(valorNum)} em ${LABEL_CATEGORIA[categoria]} — ${LABEL_TAG[tag]}`
+        ? parcelado
+          ? `${formatBRL(valorNum)} em ${LABEL_CATEGORIA[categoria]}, ${numParcelas}x de ${formatBRL(dividirEmParcelas(valorNum, numParcelas)[0])} no crédito — ${LABEL_TAG[tag]}`
+          : `${formatBRL(valorNum)} em ${LABEL_CATEGORIA[categoria]} no ${LABEL_FORMA_PAGAMENTO[formaPagamento]} — ${LABEL_TAG[tag]}`
         : tipo === "renda"
           ? `${formatBRL(valorNum)} de renda — ${LABEL_TAG[tag]}`
           : `${formatBRL(valorNum)} guardados — ${LABEL_TAG[tag]}`,
     );
     setValor("");
     setDescricao("");
+    setParcelas("1");
   }
 
   /**
@@ -240,6 +335,71 @@ export default function LancamentoForm() {
             })}
           </div>
         </fieldset>
+      )}
+
+      {/* Forma de pagamento — só o gasto tem. */}
+      {tipo === "gasto" && (
+        <fieldset>
+          <legend className="mb-3 text-xs font-medium uppercase tracking-[0.16em] text-[var(--color-tinta-fraca)]">
+            Forma de pagamento
+          </legend>
+          <div className="flex gap-2.5">
+            {FORMAS_PAGAMENTO.map((f) => {
+              const ativa = formaPagamento === f;
+              const cor = COR_FORMA[f];
+              return (
+                <button
+                  key={f}
+                  type="button"
+                  onClick={() => setFormaPagamento(f)}
+                  aria-pressed={ativa}
+                  className="min-h-[56px] flex-1 rounded-2xl border text-base font-semibold transition-colors"
+                  style={{
+                    borderColor: ativa ? cor : "var(--color-borda)",
+                    background: ativa
+                      ? `color-mix(in oklab, ${cor} 16%, transparent)`
+                      : "var(--color-superficie)",
+                    color: ativa ? cor : "var(--color-tinta-media)",
+                  }}
+                >
+                  {LABEL_FORMA_PAGAMENTO[f]}
+                </button>
+              );
+            })}
+          </div>
+        </fieldset>
+      )}
+
+      {/* Parcelas — só faz sentido no crédito. */}
+      {tipo === "gasto" && formaPagamento === "credito" && (
+        <div>
+          <label
+            htmlFor="parcelas"
+            className="mb-3 block text-xs font-medium uppercase tracking-[0.16em] text-[var(--color-tinta-fraca)]"
+          >
+            Parcelas
+          </label>
+          <input
+            id="parcelas"
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={MAX_PARCELAS}
+            step={1}
+            value={parcelas}
+            onChange={(e) => setParcelas(e.target.value)}
+            className="num min-h-[52px] w-full rounded-2xl border border-[var(--color-borda)] bg-[var(--color-superficie)] px-4 text-base outline-none transition-colors focus:border-[var(--color-accent)]"
+          />
+          {previa && (
+            <p
+              aria-live="polite"
+              className="num mt-2 text-sm text-[var(--color-accent-claro)]"
+            >
+              {numParcelas}x de {formatBRL(previa.parcela)} ={" "}
+              {formatBRL(previa.total)} total
+            </p>
+          )}
+        </div>
       )}
 
       {/* Pessoa — os três tipos têm, muda só o rótulo. */}

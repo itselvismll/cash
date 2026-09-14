@@ -4,6 +4,8 @@ Bot Node.js que recebe mensagens em linguagem livre e grava no Supabase: gastos 
 
 Stack: [grammY](https://grammy.dev) + `@supabase/supabase-js`, em long polling (roda em serviço always-on, tipo Railway).
 
+**Node 22 ou mais novo.** O `@supabase/supabase-js` usa o `WebSocket` global do runtime, que só é estável a partir do 22 — no 20 ele quebra com `Node.js detected but native WebSocket not found`. A versão está fixada em dois lugares, porque build e runtime olham para lugares diferentes: `engines.node` no [`package.json`](package.json) e [`.nvmrc`](.nvmrc).
+
 ## 1. Criar o bot no BotFather
 
 1. No Telegram, abra [@BotFather](https://t.me/BotFather).
@@ -58,7 +60,8 @@ Mande uma mensagem para o bot no Telegram e confira a linha nova na tabela `tran
 3. **Settings → Deploy:**
    - Build: `npm install && npm run build`
    - Start: `npm start`
-4. O bot usa long polling, então não precisa de domínio público nem webhook. Só não suba duas instâncias ao mesmo tempo — o Telegram recusa polling duplicado (erro 409).
+4. **Node:** o `.nvmrc` da pasta já pede a 22 — tanto o Railpack quanto o Nixpacks leem esse arquivo, então não é preciso configurar nada na interface. Se o log do build ainda mostrar a 20, force com a variável `RAILPACK_NODE_VERSION=22` (ou `NIXPACKS_NODE_VERSION=22`, se o serviço for antigo e ainda usar Nixpacks).
+5. O bot usa long polling, então não precisa de domínio público nem webhook. Só não suba duas instâncias ao mesmo tempo — o Telegram recusa polling duplicado (erro 409).
 
 Mesma receita funciona em Render, Fly.io ou qualquer VPS com `pm2`.
 
